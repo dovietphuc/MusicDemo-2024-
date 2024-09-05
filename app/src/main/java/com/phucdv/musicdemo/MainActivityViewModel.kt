@@ -11,7 +11,10 @@ import kotlinx.coroutines.launch
 class MainActivityViewModel(val repository: MusicRepository) : ViewModel() {
 
     private val _allSongs = MutableStateFlow<List<Song>>(emptyList())
-    public val allSongs = _allSongs.asStateFlow()
+    val allSongs = _allSongs.asStateFlow()
+
+    val isPlayingFlow = MutableStateFlow(false)
+    val playingSongFlow = MutableStateFlow<Song?>(null)
 
     init {
         viewModelScope.launch {
