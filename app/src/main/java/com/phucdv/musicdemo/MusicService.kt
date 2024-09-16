@@ -1,14 +1,20 @@
 package com.phucdv.musicdemo
 
 import android.app.Service
+import android.content.ContentUris
 import android.content.Intent
 import android.media.MediaPlayer
+import android.os.Binder
 import android.os.IBinder
+import android.provider.MediaStore
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlin.random.Random
 
 class MusicService : Service() {
     companion object {
@@ -32,10 +38,13 @@ class MusicService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.Main)
     private lateinit var repository: MusicRepository
-    private var listSong = emptyList<Song>()
-    private var currentPlaying: Pair<Int, Song>? = null
-    private var repeatMode = REPEAT_MODE_OFF
-    private var isSuffer = false
+    private val _allSongs = MutableStateFlow<List<Song>>(emptyList())
+    val allSongs = _allSongs.asStateFlow()
+    val currentPlaying = MutableStateFlow<Pair<Int, Song>?>(null)
+    val isPlayingFlow = MutableStateFlow(false)
+
+    val repeatMode = MutableStateFlow<Int>(REPEAT_MODE_OFF)
+    val isSuffer = MutableStateFlow<Boolean>(false)
 
     private val mediaPlayer = MediaPlayer().apply {
         setAudioAttributes(
@@ -47,7 +56,7 @@ class MusicService : Service() {
             start()
         }
         setOnCompletionListener {
-
+            playOnEnd()
         }
     }
 
@@ -55,7 +64,7 @@ class MusicService : Service() {
         super.onCreate()
         repository = MusicRepository(this)
         scope.launch {
-            listSong = repository.getAllSongs()
+            _allSongs.value = repository.getAllSongs()
         }
     }
 
@@ -64,7 +73,7 @@ class MusicService : Service() {
             ACTION_PLAY_PAUSE -> {
                 val songId = intent.getLongExtra(EXTRA_SONG_ID, -1L)
                 if(songId != -1L) {
-                    playPause()
+                    playPause(songId)
                 }
             }
             ACTION_NEXT -> {
@@ -96,6 +105,105 @@ class MusicService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
+    private fun setSufferMode(sufferMode: Boolean) {
+        this.isSuffer.value = sufferMode
+    }
+
+    private fun setRepeatMode(repeatMode: Int) {
+        this.repeatMode.value = repeatMode
+    }
+
+    private fun seekTo(seekValue: Long) {
+        mediaPlayer.seekTo(seekValue.toInt())
+    }
+
+    private fun playPrev() {
+        val listSong = allSongs.value
+        if(listSong.isEmpty()) return
+
+        val currentPlaying = currentPlaying.value
+        val songId = if (currentPlaying == null) {
+                listSong[listSong.size - 1].id
+            } else if (currentPlaying.first == 0) {
+                listSong[listSong.size - 1].id
+            } else {
+                listSong[(currentPlaying.first ?: 1) - 1].id
+            }
+        playSong(songId.toLong())
+    }
+
+    private fun playOnEnd() {
+        val repeatMode = repeatMode.value
+        when(repeatMode) {
+            REPEAT_MODE_OFF -> {
+                isPlayingFlow.value = false
+            }
+            REPEAT_MODE_ONE -> {
+                val currentPlaying = currentPlaying.value
+                currentPlaying?.let {
+                    playSong(it.second.id.toLong())
+                }
+            }
+            REPEAT_MODE_ALL -> {
+                playNext()
+            }
+        }
+    }
+
+    private fun playNext() {
+        val listSong = allSongs.value
+        if(listSong.isEmpty()) return
+
+        val isSuffer = isSuffer.value
+        val currentPlaying = currentPlaying.value
+
+        val songId = if(isSuffer) {
+            val index = Random(listSong.size - 1).nextInt()
+            listSong[index].id
+        } else {
+            if(currentPlaying == null) {
+                listSong[0].id
+            } else if(currentPlaying.first == listSong.size - 1) {
+                listSong[0].id
+            } else {
+                listSong[(currentPlaying.first ?: -1) + 1].id
+            }
+        }
+        playSong(songId.toLong())
+    }
+
+    private fun playPause(songId: Long) {
+        if(currentPlaying.value?.second?.id == songId.toInt()) {
+            if(mediaPlayer.isPlaying) {
+                mediaPlayer.pause()
+                isPlayingFlow.value = false
+            } else {
+                mediaPlayer.start()
+                isPlayingFlow.value = true
+            }
+        } else {
+            playSong(songId)
+        }
+    }
+
+    private fun playSong(songId: Long) {
+        isPlayingFlow.value = true
+        val listSong = allSongs.value
+        mediaPlayer.reset()
+        val index = listSong.indexOfFirst {
+            it.id.toLong() == songId
+        }
+        currentPlaying.value = index to listSong[index]
+        val trackUri =
+            ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, songId)
+        try {
+            mediaPlayer.setDataSource(this, trackUri)
+        } catch (e: Exception) {
+            Log.e("MUSIC SERVICE", "Error starting data source", e)
+        }
+        mediaPlayer.prepareAsync()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
@@ -106,6 +214,12 @@ class MusicService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? {
-        return null
+        return MusicBinder()
+    }
+
+    inner class MusicBinder : Binder() {
+        public fun getMusicService() : MusicService {
+            return this@MusicService
+        }
     }
 }

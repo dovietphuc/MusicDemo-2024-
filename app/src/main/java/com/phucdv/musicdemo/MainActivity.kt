@@ -1,5 +1,6 @@
 package com.phucdv.musicdemo
 
+import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -7,12 +8,14 @@ import android.content.Intent.CATEGORY_DEFAULT
 import android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
 import android.content.Intent.FLAG_ACTIVITY_NEW_TASK
 import android.content.Intent.FLAG_ACTIVITY_NO_HISTORY
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.provider.MediaStore
 import android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
 import android.util.Log
@@ -32,8 +35,18 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
-    private val viewModel by viewModels<MainActivityViewModel> {
-        MainActivityViewModel.Factory(this)
+    private var service: MusicService? = null
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            if(binder is MusicService.MusicBinder) {
+                service = binder.getMusicService()
+                listenViewModel()
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+        }
     }
 
     private val isAtLeast13 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -41,24 +54,11 @@ class MainActivity : AppCompatActivity() {
     else android.Manifest.permission.READ_EXTERNAL_STORAGE
 
     private val adapter = SongAdapter { song ->
-        if(viewModel.isPlayingFlow.value) {
-            if(viewModel.playingSongFlow.value == song) {
-                viewModel.isPlayingFlow.value = false
-                mediaPlayer.pause()
-            } else {
-                playSong(song)
-            }
-        } else {
-            if(viewModel.playingSongFlow.value == song) {
-                viewModel.isPlayingFlow.value = true
-                mediaPlayer.start()
-            } else {
-                playSong(song)
-            }
-        }
+        startService(Intent(this@MainActivity, MusicService::class.java).apply {
+            action = MusicService.ACTION_PLAY_PAUSE
+            putExtra(MusicService.EXTRA_SONG_ID, song.id.toLong())
+        })
     }
-
-    private val mediaPlayer = MediaPlayer()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,29 +74,17 @@ class MainActivity : AppCompatActivity() {
         if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
             requestReadExternalIfNeed()
         } else {
-            listenViewModel()
+            bindService(Intent(this, MusicService::class.java), serviceConnection, BIND_AUTO_CREATE)
         }
 
         initView()
 
-        mediaPlayer.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build())
-
-        mediaPlayer.setOnPreparedListener {
-            mediaPlayer.start()
-        }
-        mediaPlayer.setOnCompletionListener {
-            viewModel.isPlayingFlow.value = false
-            viewModel.playingSongFlow.value = null
-        }
     }
 
     private val requestReadExternalPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                listenViewModel()
+                bindService(Intent(this, MusicService::class.java), serviceConnection, BIND_AUTO_CREATE)
             } else {
                 showPermissionDialog()
             }
@@ -118,7 +106,7 @@ class MainActivity : AppCompatActivity() {
         when {
             checkSelfPermission(permission)
                     == PackageManager.PERMISSION_GRANTED -> {
-                listenViewModel()
+                bindService(Intent(this, MusicService::class.java), serviceConnection, BIND_AUTO_CREATE)
             }
 
             shouldShowRequestPermissionRationale(permission) -> {
@@ -150,40 +138,60 @@ class MainActivity : AppCompatActivity() {
 
     private fun initView() {
         binding.rcvSong.adapter = adapter
+
+        binding.btnPlayPause.setOnClickListener {
+            startService(Intent(this@MainActivity, MusicService::class.java).apply {
+                action = MusicService.ACTION_PLAY_PAUSE
+                putExtra(MusicService.EXTRA_SONG_ID, service?.currentPlaying?.value?.second?.id?.toLong())
+            })
+        }
+        binding.btnNext.setOnClickListener {
+            startService(Intent(this@MainActivity, MusicService::class.java).apply {
+                action = MusicService.ACTION_NEXT
+            })
+        }
+        binding.btnPrev.setOnClickListener {
+            startService(Intent(this@MainActivity, MusicService::class.java).apply {
+                action = MusicService.ACTION_PREV
+            })
+        }
     }
 
     private fun listenViewModel() {
         lifecycleScope.launch {
-            viewModel.allSongs.collectLatest { allSongs ->
+            service?.allSongs?.collectLatest { allSongs ->
                 adapter.submitList(allSongs)
             }
         }
 
         lifecycleScope.launch {
-            viewModel.isPlayingFlow.collectLatest {
+            service?.isPlayingFlow?.collectLatest {
                 adapter.isPlaying = it
+                binding.btnPlayPause.text = if(it) "Pause" else "Play"
             }
         }
 
         lifecycleScope.launch {
-            viewModel.playingSongFlow.collectLatest {
-                adapter.playingSong = it
+            service?.currentPlaying?.collectLatest {
+                adapter.playingSong = it?.second
+            }
+        }
+
+        lifecycleScope.launch {
+            service?.repeatMode?.collectLatest {
+
+            }
+        }
+
+        lifecycleScope.launch {
+            service?.isSuffer?.collectLatest {
+
             }
         }
     }
 
-    fun playSong(song: Song) {
-        mediaPlayer.reset()
-        val trackUri =
-            ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, song.id.toLong())
-        try {
-            mediaPlayer.setDataSource(this, trackUri)
-        } catch (e: Exception) {
-            Log.e("MUSIC SERVICE", "Error starting data source", e)
-        }
-        viewModel.playingSongFlow.value = song
-        viewModel.isPlayingFlow.value = true
-        mediaPlayer.prepareAsync()
+    override fun onDestroy() {
+        super.onDestroy()
+        unbindService(serviceConnection)
     }
-
 }
